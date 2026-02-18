@@ -2,7 +2,7 @@
 #include "acpi.h"
 #include "mem.h"
 #include "x86.h"
-#include "serial.h"
+#include "print.h"
 
 static volatile u32 *lapic_base;
 static volatile u32 *ioapic_base;
@@ -36,14 +36,14 @@ void pic_disable(void) {
 void lapic_init(void) {
     struct MADT *madt = acpi_tables.madt;
     if (!madt) {
-        serial_puts("LAPIC: No MADT found!\r\n");
+        puts("LAPIC: No MADT found!\r\n");
         return;
     }
-    serial_puts("LAPIC: MADT found\r\n");
+    puts("LAPIC: MADT found\r\n");
 
     // Get LAPIC base from MADT
     lapic_base = PHYS_TO_VIRT((u64)madt->local_apic_addr);
-    serial_puts("LAPIC: base set\r\n");
+    puts("LAPIC: base set\r\n");
 
     // Check for LAPIC address override in MADT entries
     // Entries start at offset 44: header(36) + local_apic_addr(4) + flags(4)
@@ -62,22 +62,22 @@ void lapic_init(void) {
         }
         ptr += len;
     }
-    serial_puts("LAPIC: parsed MADT entries\r\n");
+    puts("LAPIC: parsed MADT entries\r\n");
 
     // Map LAPIC MMIO region
-    serial_puts("LAPIC: mapping MMIO...\r\n");
+    puts("LAPIC: mapping MMIO...\r\n");
     map_mmio((u64)madt->local_apic_addr, PAGE_SIZE);
 
     // Enable LAPIC via Spurious Vector Register
     // Vector 0xFF for spurious interrupts, set enable bit
-    serial_puts("LAPIC: writing SVR...\r\n");
+    puts("LAPIC: writing SVR...\r\n");
     lapic_write(LAPIC_SVR, LAPIC_SVR_ENABLE | 0xFF);
-    serial_puts("LAPIC: SVR done\r\n");
+    puts("LAPIC: SVR done\r\n");
 
     // Set task priority to 0 (accept all interrupts)
     lapic_write(LAPIC_TPR, 0);
 
-    serial_puts("[ OK ] LAPIC initialized\r\n");
+    puts("[ OK ] LAPIC initialized\r\n");
 }
 
 void lapic_eoi(void) {
@@ -91,7 +91,7 @@ u32 lapic_id(void) {
 void ioapic_init(void) {
     struct MADT *madt = acpi_tables.madt;
     if (!madt) {
-        serial_puts("IOAPIC: No MADT found!\r\n");
+        puts("IOAPIC: No MADT found!\r\n");
         return;
     }
 
@@ -106,23 +106,16 @@ void ioapic_init(void) {
 
         if (type == MADT_IOAPIC) {
             // Debug: print raw bytes
-            serial_puts("IOAPIC entry bytes: ");
+            puts("IOAPIC entry bytes: ");
             for (int i = 0; i < 12; i++) {
-                u8 b = ptr[i];
-                serial_putc("0123456789ABCDEF"[(b >> 4) & 0xF]);
-                serial_putc("0123456789ABCDEF"[b & 0xF]);
-                serial_putc(' ');
+                puthex8(ptr[i]);
+                putc(' ');
             }
-            serial_puts("\r\n");
+            puts("\r\n");
 
             // IOAPIC entry: type(1) len(1) id(1) reserved(1) addr(4) gsi_base(4)
             u32 addr = ptr[4] | (ptr[5] << 8) | (ptr[6] << 16) | (ptr[7] << 24);
-            serial_puts("IOAPIC: phys addr 0x");
-            for (int i = 7; i >= 0; i--) {
-                u8 nibble = (addr >> (i * 4)) & 0xF;
-                serial_putc(nibble < 10 ? '0' + nibble : 'A' + nibble - 10);
-            }
-            serial_puts("\r\n");
+            printf("IOAPIC: phys addr 0x%x\r\n", addr);
             map_mmio((u64)addr, PAGE_SIZE);
             ioapic_base = PHYS_TO_VIRT((u64)addr);
             break;
@@ -131,7 +124,7 @@ void ioapic_init(void) {
     }
 
     if (!ioapic_base) {
-        serial_puts("IOAPIC: Not found in MADT!\r\n");
+        puts("IOAPIC: Not found in MADT!\r\n");
         return;
     }
 
@@ -142,7 +135,7 @@ void ioapic_init(void) {
         ioapic_write(IOAPIC_REDTBL + i * 2 + 1, 0);
     }
 
-    serial_puts("[ OK ] IOAPIC initialized\r\n");
+    puts("[ OK ] IOAPIC initialized\r\n");
 }
 
 // Translate ISA IRQ to GSI (checks for Interrupt Source Overrides)
@@ -164,12 +157,7 @@ static u32 irq_to_gsi(u8 irq) {
             u8 source_irq = ptr[3];
             u32 gsi = *(u32 *)(ptr + 4);
             if (source_irq == irq) {
-                serial_puts("IRQ override: ");
-                serial_putc('0' + irq);
-                serial_puts(" -> GSI ");
-                serial_putc('0' + (gsi / 10));
-                serial_putc('0' + (gsi % 10));
-                serial_puts("\r\n");
+                printf("IRQ override: %u -> GSI %u\r\n", irq, gsi);
                 return gsi;
             }
         }
@@ -183,14 +171,7 @@ void ioapic_route_irq(u8 irq, u8 vector, u8 dest_lapic_id) {
     u32 lo = vector;                      // vector number
     u32 hi = (u32)dest_lapic_id << 24;    // destination APIC ID
 
-    serial_puts("IOAPIC: routing GSI ");
-    serial_putc('0' + gsi);
-    serial_puts(" to vec ");
-    serial_putc('0' + (vector / 10));
-    serial_putc('0' + (vector % 10));
-    serial_puts(" LAPIC ");
-    serial_putc('0' + dest_lapic_id);
-    serial_puts("\r\n");
+    printf("IOAPIC: routing GSI %u to vec %u LAPIC %u\r\n", gsi, vector, dest_lapic_id);
 
     ioapic_write(IOAPIC_REDTBL + gsi * 2 + 1, hi);  // write hi first
     ioapic_write(IOAPIC_REDTBL + gsi * 2, lo);
@@ -198,17 +179,7 @@ void ioapic_route_irq(u8 irq, u8 vector, u8 dest_lapic_id) {
     // Read back and verify both
     u32 lo_read = ioapic_read(IOAPIC_REDTBL + gsi * 2);
     u32 hi_read = ioapic_read(IOAPIC_REDTBL + gsi * 2 + 1);
-    serial_puts("IOAPIC: lo=0x");
-    for (int i = 7; i >= 0; i--) {
-        u8 nibble = (lo_read >> (i * 4)) & 0xF;
-        serial_putc(nibble < 10 ? '0' + nibble : 'A' + nibble - 10);
-    }
-    serial_puts(" hi=0x");
-    for (int i = 7; i >= 0; i--) {
-        u8 nibble = (hi_read >> (i * 4)) & 0xF;
-        serial_putc(nibble < 10 ? '0' + nibble : 'A' + nibble - 10);
-    }
-    serial_puts("\r\n");
+    printf("IOAPIC: lo=0x%x hi=0x%x\r\n", lo_read, hi_read);
 }
 
 void ioapic_mask_irq(u8 irq) {

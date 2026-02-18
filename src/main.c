@@ -3,9 +3,12 @@
 #include "idt.h"
 #include "limine.h"
 #include "mem.h"
+#include "print.h"
 #include "serial.h"
 #include "types.h"
 #include "x86.h"
+#include "pci.h"
+#include "ahci.h"
 
 static volatile u64 limine_base_revision[] = LIMINE_BASE_REVISION(4);
 
@@ -40,7 +43,7 @@ void ap_entry(struct limine_mp_info *info) {
 void kmain(void) {
     init_idt();
     init_serial();
-    serial_puts("[ OK ] Kernel starting!\r\n");
+    puts("[ OK ] Kernel starting!\r\n");
 
     // Initialize memory allocator with HHDM offset
     kinit(hhdm_request.response->offset);
@@ -58,7 +61,7 @@ void kmain(void) {
         }
     }
 
-    serial_puts("[ OK ] Memory initialized\r\n");
+    puts("[ OK ] Memory initialized\r\n");
 
     // Start APs (Application Processors)
     struct limine_mp_response *mp_response = mp_request.response;
@@ -82,18 +85,18 @@ void kmain(void) {
         while (__atomic_load_n(&ap_started, __ATOMIC_SEQ_CST) < expected_aps)
             ;
 
-        serial_puts("[ OK ] All CPUs started\r\n");
+        puts("[ OK ] All CPUs started\r\n");
     }
 
-    serial_puts("Starting ACPI...\r\n");
+    puts("Starting ACPI...\r\n");
     init_acpi(rsdp_request.response->address);
-    serial_puts("ACPI done, disabling PIC...\r\n");
+    puts("ACPI done, disabling PIC...\r\n");
     pic_disable();
-    serial_puts("PIC disabled, starting LAPIC...\r\n");
+    puts("PIC disabled, starting LAPIC...\r\n");
     lapic_init();
-    serial_puts("LAPIC done, starting IOAPIC...\r\n");
+    puts("LAPIC done, starting IOAPIC...\r\n");
     ioapic_init();
-    serial_puts("IOAPIC done\r\n");
+    puts("IOAPIC done\r\n");
 
     // Draw something on framebuffer
     struct limine_framebuffer *framebuffer =
@@ -103,11 +106,9 @@ void kmain(void) {
         fb_ptr[1 * (framebuffer->width) + i] = 0xFFFFFFFF;
     }
 
-    serial_puts("[ OK ] Kernel initialized!\r\n");
+    puts("[ OK ] Kernel initialized!\r\n");
 
-    serial_puts("LAPIC ID: ");
-    serial_putc('0' + lapic_id());
-    serial_puts("\r\n");
+    printf("LAPIC ID: %u\r\n", lapic_id());
 
     // Route timer (IRQ 0) to test if IOAPIC works at all
     ioapic_route_irq(0, 32, lapic_id());
@@ -126,10 +127,15 @@ void kmain(void) {
     while (inb(0x64) & 0x02);
     outb(0x60, config);
 
-    serial_puts("Keyboard enabled\r\n");
+    puts("Keyboard enabled\r\n");
+
+    pci_scan();
+
+    ahci_init();
+
     sti();
 
-    serial_puts("Waiting for keyboard...\r\n");
+    puts("Waiting for keyboard...\r\n");
 
     for (;;) {
         hlt();

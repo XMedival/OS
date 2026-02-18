@@ -1,5 +1,5 @@
 CC := gcc
-CFLAGS := -m64 -Wall -Wextra -Werror -ffreestanding -no-pie
+CFLAGS := -m64 -Wall -Wextra -Werror -ffreestanding -fno-stack-protector -no-pie
 AS := nasm
 ASFLAGS :=
 LD := ld
@@ -35,7 +35,10 @@ limine:
 	@make -C limine
 
 run: $(DISK)
-	@qemu-system-x86_64 -hda $<
+	@qemu-system-x86_64 -machine q35 -serial stdio \
+		-drive file=$<,if=none,id=disk0 \
+		-device ahci,id=ahci \
+		-device ide-hd,drive=disk0,bus=ahci.0
 
 disk: $(DISK)
 

@@ -1,7 +1,8 @@
 #include "idt.h"
-#include "serial.h"
+#include "print.h"
 #include "x86.h"
 #include "apic.h"
+#include "panic.h"
 
 static struct idt_entry idt[IDT_ENTRIES];
 static struct idt_ptr idtr;
@@ -208,7 +209,7 @@ static const char scancode_table[128] = {
     '*', 0, ' '
 };
 
-void exception_handler(struct int_frame *frame) {
+void exception_handler(struct trap_frame *frame) {
     switch (frame->int_no) {
     case 32:  // Timer
         lapic_eoi();
@@ -218,25 +219,19 @@ void exception_handler(struct int_frame *frame) {
         if (!(scancode & 0x80)) {  // key press (not release)
             char c = scancode_table[scancode];
             if (c) {
-                serial_putc(c);
+                putc(c);
             }
         }
         lapic_eoi();
         break;
     }
-    case 34 ... 255:
-        lapic_eoi();
-	break;
+    case 0:
+        panic("DIVISION ERROR", frame);
+    case 8:
+        panic("DOUBLE FAULT", frame);
+    case 18:
+      panic("MACHINE CHECK",frame);
     default:
-        serial_puts("EXCEPTION: ");
-        serial_putc('0' + (frame->int_no / 10));
-        serial_putc('0' + (frame->int_no % 10));
-        serial_puts("\r\n");
-
-        // Halt
-        for (;;) {
-            cli();
-            hlt();
-        }
+      panic(0, frame);
     }
 }
