@@ -77,19 +77,17 @@ void *kalloc(u64 npages) {
       // Check if next n-1 pages are also free and contiguous
       u64 base = (u64)r;
       u64 found = 1;
-      struct run *last = r;
 
       for (u64 i = 1; i < npages; i++) {
         u64 expected = base + i * PAGE_SIZE;
-        // Search for this page in the freelist
-        struct run *search = last->next;
+        // Search entire freelist for this page
+        struct run *search = kmem.freelist;
         int found_page = 0;
 
         while (search) {
           if ((u64)search == expected) {
             found_page = 1;
             found++;
-            last = search;
             break;
           }
           search = search->next;

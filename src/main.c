@@ -140,6 +140,19 @@ void kmain(void) {
 
     puts("Waiting for keyboard...\r\n");
 
+    struct fat_dir_entry file;
+    // Test LFN support with limine.conf
+    if (fat_open("/boot/limine/limine.conf", &file) == 0) {
+        printf("Found limine.conf! size=%u\r\n", file.file_size);
+        char buf[512];
+        u32 read = fat_read(&file, 0, 511, buf);
+        buf[read] = '\0';
+        puts("Contents:\r\n");
+        puts(buf);
+    } else {
+        puts("Could not open limine.conf\r\n");
+    }        
+
     for (;;) {
         hlt();
     }

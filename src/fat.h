@@ -2,6 +2,67 @@
 #define FAT_H
 #include "types.h"
 
+// MBR partition types
+#define MBR_TYPE_FAT32_LBA   0x0C
+#define MBR_TYPE_FAT32       0x0B
+#define MBR_TYPE_FAT16_LBA   0x0E
+#define MBR_TYPE_FAT16       0x06
+#define MBR_SIGNATURE        0xAA55
+
+struct mbr_partition {
+    u8  boot_indicator;
+    u8  start_chs[3];
+    u8  partition_type;
+    u8  end_chs[3];
+    u32 start_lba;
+    u32 size_sectors;
+} __attribute__((packed));
+
+struct mbr {
+    u8  bootstrap[446];
+    struct mbr_partition partitions[4];
+    u16 signature;
+} __attribute__((packed));
+
+// GPT signatures
+#define GPT_SIGNATURE 0x5452415020494645ULL  // "EFI PART"
+
+// EFI System Partition GUID: C12A7328-F81F-11D2-BA4B-00A0C93EC93B
+// Stored as little-endian: first 3 fields byte-swapped
+static const u8 ESP_GUID[16] = {
+    0x28, 0x73, 0x2A, 0xC1,  // C12A7328 (little-endian)
+    0x1F, 0xF8,              // F81F (little-endian)
+    0xD2, 0x11,              // 11D2 (little-endian)
+    0xBA, 0x4B,              // BA4B (big-endian)
+    0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B  // 00A0C93EC93B (big-endian)
+};
+
+struct gpt_header {
+    u64 signature;
+    u32 revision;
+    u32 header_size;
+    u32 header_crc32;
+    u32 _reserved;
+    u64 current_lba;
+    u64 backup_lba;
+    u64 first_usable_lba;
+    u64 last_usable_lba;
+    u8  disk_guid[16];
+    u64 partition_entries_lba;
+    u32 num_partition_entries;
+    u32 partition_entry_size;
+    u32 partition_array_crc32;
+} __attribute__((packed));
+
+struct gpt_entry {
+    u8  type_guid[16];
+    u8  unique_guid[16];
+    u64 starting_lba;
+    u64 ending_lba;
+    u64 attributes;
+    u16 name[36];  // UTF-16LE partition name
+} __attribute__((packed));
+
 // FAT boot sector signatures
 #define FAT_BOOT_SIGNATURE     0xAA55
 #define FAT_EBR_SIGNATURE_28   0x28
