@@ -7,11 +7,14 @@
 // Global state
 static struct pci_device *ahci_dev;
 static struct hba_mem *hba;
+struct hba_port *ahci_sata_port;       // First SATA port (for convenience)
+struct ahci_port_info ahci_sata_info;  // Info for first SATA port
 
 // Per-port allocated structures (32 ports max)
 static struct hba_cmd_header *cmd_lists[32];
 static struct hba_received_fis *fis_areas[32];
 static struct hba_cmd_table *cmd_tables[32][32];  // [port][slot]
+static struct ahci_port_info port_info[32];       // Per-port device info
 
 // ============================================================================
 // Port Control
@@ -47,16 +50,16 @@ void ahci_port_reset(struct hba_port *port) {
     ahci_port_stop(port);
 
     // Issue COMRESET via SCTL
-    port->sctl = (port->sctl & ~0xF) | 0x1;  // DET = 1 (COMRESET)
+    port->sctl = (port->sctl & ~SCTL_DET_MASK) | SCTL_DET_COMRESET;
 
     // Wait a bit (spec says at least 1ms)
     for (volatile int i = 0; i < 100000; i++)
         ;
 
-    port->sctl &= ~0xF;  // DET = 0 (no action)
+    port->sctl &= ~SCTL_DET_MASK;  // DET = 0 (no action)
 
     // Wait for device to come back
-    while ((port->ssts & 0xF) != 0x3)
+    while (HBA_PORT_SSTS_DET(port->ssts) != HBA_PORT_SSTS_DET_PRESENT)
         ;
 
     // Clear errors
@@ -79,9 +82,9 @@ int ahci_port_init(struct hba_port *port) {
     ahci_port_stop(port);
 
     // Allocate command list (1KB, 1KB aligned)
-    struct hba_cmd_header *cmd_list = kalloc();
+    struct hba_cmd_header *cmd_list = kalloc(1);
     if (!cmd_list) return -1;
-    for (int i = 0; i < 4096; i++) ((u8*)cmd_list)[i] = 0;
+    memset(cmd_list, 0, PAGE_SIZE);
     cmd_lists[port_num] = cmd_list;
 
     u64 cmd_list_phys = VIRT_TO_PHYS((u64)cmd_list);
@@ -89,9 +92,9 @@ int ahci_port_init(struct hba_port *port) {
     port->clbu = (u32)(cmd_list_phys >> 32);
 
     // Allocate received FIS area (256 bytes, 256 aligned)
-    struct hba_received_fis *fis = kalloc();
+    struct hba_received_fis *fis = kalloc(1);
     if (!fis) return -1;
-    for (int i = 0; i < 4096; i++) ((u8*)fis)[i] = 0;
+    memset(fis, 0, PAGE_SIZE);
     fis_areas[port_num] = fis;
 
     u64 fis_phys = VIRT_TO_PHYS((u64)fis);
@@ -100,9 +103,9 @@ int ahci_port_init(struct hba_port *port) {
 
     // Allocate command tables (one per slot, 128-byte aligned)
     for (int slot = 0; slot < 32; slot++) {
-        struct hba_cmd_table *tbl = kalloc();
+        struct hba_cmd_table *tbl = kalloc(1);
         if (!tbl) return -1;
-        for (int i = 0; i < 4096; i++) ((u8*)tbl)[i] = 0;
+        memset(tbl, 0, PAGE_SIZE);
         cmd_tables[port_num][slot] = tbl;
 
         u64 tbl_phys = VIRT_TO_PHYS((u64)tbl);
@@ -124,11 +127,11 @@ int ahci_port_init(struct hba_port *port) {
 
 int ahci_port_type(struct hba_port *port) {
     u32 ssts = port->ssts;
-    u8 det = ssts & 0xF;
-    u8 ipm = (ssts >> 8) & 0xF;
+    u8 det = HBA_PORT_SSTS_DET(ssts);
+    u8 ipm = HBA_PORT_SSTS_IPM(ssts);
 
-    if (det != 0x3) return AHCI_DEV_NULL;  // No device
-    if (ipm != 0x1) return AHCI_DEV_NULL;  // Not active
+    if (det != HBA_PORT_SSTS_DET_PRESENT) return AHCI_DEV_NULL;  // No device
+    if (ipm != HBA_PORT_SSTS_IPM_ACTIVE) return AHCI_DEV_NULL;   // Not active
 
     switch (port->sig) {
     case SATA_SIG_ATA:   return AHCI_DEV_SATA;
@@ -164,16 +167,57 @@ int ahci_issue(struct hba_port *port, int slot) {
     while (1) {
         if (!(port->ci & (1 << slot)))
             break;
-        if (port->is & (1 << 30)) {  // Task file error
+        if (port->is & HBA_PORT_IS_TFES) {  // Task file error
             return -1;
         }
     }
 
     // Check for error
-    if (port->is & (1 << 30))
+    if (port->is & HBA_PORT_IS_TFES)
         return -1;
 
     return 0;
+}
+
+// ============================================================================
+// Sector Size Detection
+// ============================================================================
+
+void ahci_parse_identify(u8 *id, struct ahci_port_info *info) {
+    // Parse model string (words 27-46, byte-swapped)
+    for (int j = 0; j < 40; j += 2) {
+        info->model[j] = id[ATA_IDENTIFY_MODEL_OFFSET + j + 1];
+        info->model[j + 1] = id[ATA_IDENTIFY_MODEL_OFFSET + j];
+    }
+    info->model[40] = 0;
+    // Trim trailing spaces
+    for (int j = 39; j >= 0 && info->model[j] == ' '; j--)
+        info->model[j] = 0;
+
+    // Parse LBA48 sector count (words 100-103)
+    info->sector_count = *(u64 *)&id[ATA_IDENTIFY_LBA48_OFFSET];
+
+    // Parse sector size from word 106
+    u16 w106 = *(u16 *)&id[ATA_ID_SECTOR_SIZE * 2];
+
+    if ((w106 & ATA_ID_W106_VALID) && !(w106 & (1 << 15))) {
+        // Word 106 is valid
+        if (w106 & ATA_ID_W106_LOGICAL_GT512) {
+            // Logical sector size > 512 bytes, read from words 117-118
+            u32 logical_words = *(u32 *)&id[ATA_ID_LOGICAL_SIZE * 2];
+            info->sector_size = logical_words * 2;  // Convert words to bytes
+        } else {
+            info->sector_size = ATA_SECTOR_SIZE_DEFAULT;
+        }
+    } else {
+        // Word 106 not valid, assume 512 bytes
+        info->sector_size = ATA_SECTOR_SIZE_DEFAULT;
+    }
+}
+
+u32 ahci_get_sector_size(struct hba_port *port) {
+    int port_num = get_port_num(port);
+    return port_info[port_num].sector_size;
 }
 
 // ============================================================================
@@ -183,7 +227,7 @@ int ahci_issue(struct hba_port *port, int slot) {
 int ahci_identify(struct hba_port *port, void *buf) {
     int port_num = get_port_num(port);
 
-    port->is = (u32)-1;  // Clear interrupts
+    ahci_port_clear_interrupts(port);
 
     int slot = ahci_find_slot(port);
     if (slot < 0) return -1;
@@ -218,8 +262,10 @@ int ahci_identify(struct hba_port *port, void *buf) {
 
 int ahci_read(struct hba_port *port, u64 lba, u32 count, void *buf) {
     int port_num = get_port_num(port);
+    u32 sector_size = port_info[port_num].sector_size;
+    if (sector_size == 0) sector_size = ATA_SECTOR_SIZE_DEFAULT;
 
-    port->is = (u32)-1;
+    ahci_port_clear_interrupts(port);
 
     int slot = ahci_find_slot(port);
     if (slot < 0) return -1;
@@ -235,7 +281,7 @@ int ahci_read(struct hba_port *port, u64 lba, u32 count, void *buf) {
     u64 buf_phys = VIRT_TO_PHYS((u64)buf);
     tbl->prdt[0].dba = (u32)buf_phys;
     tbl->prdt[0].dbau = (u32)(buf_phys >> 32);
-    tbl->prdt[0].dbc = (count * 512) - 1;
+    tbl->prdt[0].dbc = (count * sector_size) - 1;
     tbl->prdt[0].i = 1;
 
     // Setup command FIS
@@ -243,14 +289,7 @@ int ahci_read(struct hba_port *port, u64 lba, u32 count, void *buf) {
     fis->fis_type = FIS_TYPE_REG_H2D;
     fis->flags = FIS_H2D_CMD;
     fis->command = ATA_CMD_READ_DMA_EXT;
-
-    fis->lba0 = (u8)lba;
-    fis->lba1 = (u8)(lba >> 8);
-    fis->lba2 = (u8)(lba >> 16);
-    fis->lba3 = (u8)(lba >> 24);
-    fis->lba4 = (u8)(lba >> 32);
-    fis->lba5 = (u8)(lba >> 40);
-
+    fis_set_lba48(fis, lba);
     fis->device = ATA_DEV_LBA;
     fis->count = (u16)count;
 
@@ -259,8 +298,10 @@ int ahci_read(struct hba_port *port, u64 lba, u32 count, void *buf) {
 
 int ahci_write(struct hba_port *port, u64 lba, u32 count, const void *buf) {
     int port_num = get_port_num(port);
+    u32 sector_size = port_info[port_num].sector_size;
+    if (sector_size == 0) sector_size = ATA_SECTOR_SIZE_DEFAULT;
 
-    port->is = (u32)-1;
+    ahci_port_clear_interrupts(port);
 
     int slot = ahci_find_slot(port);
     if (slot < 0) return -1;
@@ -276,7 +317,7 @@ int ahci_write(struct hba_port *port, u64 lba, u32 count, const void *buf) {
     u64 buf_phys = VIRT_TO_PHYS((u64)buf);
     tbl->prdt[0].dba = (u32)buf_phys;
     tbl->prdt[0].dbau = (u32)(buf_phys >> 32);
-    tbl->prdt[0].dbc = (count * 512) - 1;
+    tbl->prdt[0].dbc = (count * sector_size) - 1;
     tbl->prdt[0].i = 1;
 
     // Setup command FIS
@@ -284,14 +325,7 @@ int ahci_write(struct hba_port *port, u64 lba, u32 count, const void *buf) {
     fis->fis_type = FIS_TYPE_REG_H2D;
     fis->flags = FIS_H2D_CMD;
     fis->command = ATA_CMD_WRITE_DMA_EXT;
-
-    fis->lba0 = (u8)lba;
-    fis->lba1 = (u8)(lba >> 8);
-    fis->lba2 = (u8)(lba >> 16);
-    fis->lba3 = (u8)(lba >> 24);
-    fis->lba4 = (u8)(lba >> 32);
-    fis->lba5 = (u8)(lba >> 40);
-
+    fis_set_lba48(fis, lba);
     fis->device = ATA_DEV_LBA;
     fis->count = (u16)count;
 
@@ -335,6 +369,13 @@ void ahci_init(void) {
            (hba->vs >> 16) & 0xFFFF, hba->vs & 0xFFFF,
            HBA_CAP_NP(hba->cap) + 1);
 
+    // Try to enable MSI
+    if (pci_msi_enable(ahci_dev, 48) == 0) {
+        puts("AHCI: MSI enabled (vector 48)\r\n");
+    } else {
+        puts("AHCI: MSI not available, using legacy IRQ\r\n");
+    }        
+
     // Initialize implemented ports
     u32 pi = hba->pi;
     for (int i = 0; i < 32; i++) {
@@ -359,27 +400,28 @@ void ahci_init(void) {
                 continue;
             }
 
+            // Save first SATA port for convenience
+            if (!ahci_sata_port)
+                ahci_sata_port = port;
+
             // Identify the drive
-            u8 *id = kalloc();
+            u8 *id = kalloc(1);
             if (id && ahci_identify(port, id) == 0) {
-                // Model string at words 27-46 (bytes 54-93), byte-swapped
-                char model[41];
-                for (int j = 0; j < 40; j += 2) {
-                    model[j] = id[54 + j + 1];
-                    model[j + 1] = id[54 + j];
+                int port_num = get_port_num(port);
+                ahci_parse_identify(id, &port_info[port_num]);
+
+                struct ahci_port_info *info = &port_info[port_num];
+                printf("AHCI:   Model: %s\r\n", info->model);
+                printf("AHCI:   Sector size: %u bytes\r\n", info->sector_size);
+                printf("AHCI:   Size: %u MB\r\n",
+                       (u32)(info->sector_count * info->sector_size / (1024 * 1024)));
+
+                // Copy to global info if this is the first SATA port
+                if (port == ahci_sata_port) {
+                    ahci_sata_info = *info;
                 }
-                model[40] = 0;
-                // Trim trailing spaces
-                for (int j = 39; j >= 0 && model[j] == ' '; j--)
-                    model[j] = 0;
-
-                printf("AHCI:   Model: %s\r\n", model);
-
-                // LBA48 sector count at words 100-103 (bytes 200-207)
-                u64 sectors = *(u64 *)&id[200];
-                printf("AHCI:   Size: %u MB\r\n", (u32)(sectors / 2048));
             }
-            if (id) kfree(id);
+            if (id) kfree(id, 1);
         }
     }
 

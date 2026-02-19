@@ -6,6 +6,45 @@
 #define IDT_TRAP_GATE      0x8F  // present, ring 0, trap gate
 #define IDT_ENTRIES        256
 
+// Kernel code segment selector
+#define KERNEL_CS          0x28
+
+// IRQ vector numbers (remapped to start at 32)
+#define IRQ_TIMER          32
+#define IRQ_KEYBOARD       33
+#define IRQ_CASCADE        34
+#define IRQ_COM2           35
+#define IRQ_COM1           36
+#define IRQ_LPT2           37
+#define IRQ_FLOPPY         38
+#define IRQ_LPT1           39
+#define IRQ_RTC            40
+#define IRQ_FREE1          41
+#define IRQ_FREE2          42
+#define IRQ_FREE3          43
+#define IRQ_MOUSE          44
+#define IRQ_FPU            45
+#define IRQ_ATA_PRIMARY    46
+#define IRQ_ATA_SECONDARY  47
+
+// ISR stub macros (moved from x86.h for logical grouping)
+#define ISR_STUB(num)                           \
+    __attribute((naked)) void isr##num(void) {  \
+        asm volatile(                           \
+        "push $0\n"                             \
+        "push $" #num "\n"                      \
+        "jmp isr_common\n"                      \
+        );                                      \
+    }
+
+#define ISR_STUB_ERR(num)                       \
+    __attribute((naked)) void isr##num(void) {  \
+        asm volatile(                           \
+        "push $" #num "\n"                      \
+        "jmp isr_common\n"                      \
+        );                                      \
+    }
+
 struct idt_entry {
   u16	offset_1;
   u16	selector;

@@ -9,6 +9,7 @@
 #include "x86.h"
 #include "pci.h"
 #include "ahci.h"
+#include "fat.h"
 
 static volatile u64 limine_base_revision[] = LIMINE_BASE_REVISION(4);
 
@@ -132,6 +133,8 @@ void kmain(void) {
     pci_scan();
 
     ahci_init();
+
+    fat_init();
 
     sti();
 

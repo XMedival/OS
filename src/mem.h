@@ -17,9 +17,27 @@ extern u64 hhdm_offset;
 #define PTE_PCD      (1UL << 4)  // Cache disable
 #define PTE_NX       (1UL << 63) // No execute
 
+// Page frame mask (clear lower 12 bits)
+#define PAGE_FRAME_MASK  (~0xFFFUL)
+
+// Memory patterns for debugging
+#define MEM_FREE_PATTERN   1    // Pattern written to freed pages
+#define MEM_ALLOC_PATTERN  5    // Pattern written to allocated pages
+
+// Page table entry helpers
+typedef u64 pte_t;
+
+static inline u64 pte_get_phys(pte_t pte) {
+    return pte & PAGE_FRAME_MASK;
+}
+
+static inline int pte_is_present(pte_t pte) {
+    return (pte & PTE_PRESENT) != 0;
+}
+
 void freerange(u64 phys_start, u64 phys_end);
-void kfree(void *v);
-void *kalloc(void);
+void kfree(void *v, u64 npages);
+void *kalloc(u64 npages);
 void *memset(void *dst, int c, u64 n);
 void kinit(u64 hhdm);
 void map_page(u64 virt, u64 phys, u64 flags);

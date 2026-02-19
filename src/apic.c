@@ -3,6 +3,7 @@
 #include "mem.h"
 #include "x86.h"
 #include "print.h"
+#include "pit.h"
 
 static volatile u32 *lapic_base;
 static volatile u32 *ioapic_base;
@@ -46,8 +47,7 @@ void lapic_init(void) {
     puts("LAPIC: base set\r\n");
 
     // Check for LAPIC address override in MADT entries
-    // Entries start at offset 44: header(36) + local_apic_addr(4) + flags(4)
-    u8 *ptr = (u8 *)madt + 44;
+    u8 *ptr = (u8 *)madt + MADT_ENTRIES_OFFSET;
     u8 *end = (u8 *)madt + madt->h.length;
 
     while (ptr < end) {
@@ -69,9 +69,8 @@ void lapic_init(void) {
     map_mmio((u64)madt->local_apic_addr, PAGE_SIZE);
 
     // Enable LAPIC via Spurious Vector Register
-    // Vector 0xFF for spurious interrupts, set enable bit
     puts("LAPIC: writing SVR...\r\n");
-    lapic_write(LAPIC_SVR, LAPIC_SVR_ENABLE | 0xFF);
+    lapic_write(LAPIC_SVR, LAPIC_SVR_ENABLE | LAPIC_SPURIOUS_VECTOR);
     puts("LAPIC: SVR done\r\n");
 
     // Set task priority to 0 (accept all interrupts)
@@ -96,8 +95,7 @@ void ioapic_init(void) {
     }
 
     // Parse MADT entries to find I/O APIC
-    // Entries start at offset 44: header(36) + local_apic_addr(4) + flags(4)
-    u8 *ptr = (u8 *)madt + 44;
+    u8 *ptr = (u8 *)madt + MADT_ENTRIES_OFFSET;
     u8 *end = (u8 *)madt + madt->h.length;
 
     while (ptr < end) {
@@ -129,10 +127,10 @@ void ioapic_init(void) {
     }
 
     // Mask all IRQs initially
-    u32 max_redir = (ioapic_read(IOAPIC_VER) >> 16) & 0xFF;
+    u32 max_redir = IOAPIC_VER_MAX_REDIR(ioapic_read(IOAPIC_VER));
     for (u32 i = 0; i <= max_redir; i++) {
-        ioapic_write(IOAPIC_REDTBL + i * 2, 0x10000);     // masked
-        ioapic_write(IOAPIC_REDTBL + i * 2 + 1, 0);
+        ioapic_write(IOAPIC_REDTBL_LO(i), IOAPIC_REDTBL_MASKED);
+        ioapic_write(IOAPIC_REDTBL_HI(i), 0);
     }
 
     puts("[ OK ] IOAPIC initialized\r\n");
@@ -143,8 +141,7 @@ static u32 irq_to_gsi(u8 irq) {
     struct MADT *madt = acpi_tables.madt;
     if (!madt) return irq;
 
-    // Entries start at offset 44
-    u8 *ptr = (u8 *)madt + 44;
+    u8 *ptr = (u8 *)madt + MADT_ENTRIES_OFFSET;
     u8 *end = (u8 *)madt + madt->h.length;
 
     while (ptr < end) {
@@ -173,43 +170,39 @@ void ioapic_route_irq(u8 irq, u8 vector, u8 dest_lapic_id) {
 
     printf("IOAPIC: routing GSI %u to vec %u LAPIC %u\r\n", gsi, vector, dest_lapic_id);
 
-    ioapic_write(IOAPIC_REDTBL + gsi * 2 + 1, hi);  // write hi first
-    ioapic_write(IOAPIC_REDTBL + gsi * 2, lo);
+    ioapic_write(IOAPIC_REDTBL_HI(gsi), hi);  // write hi first
+    ioapic_write(IOAPIC_REDTBL_LO(gsi), lo);
 
     // Read back and verify both
-    u32 lo_read = ioapic_read(IOAPIC_REDTBL + gsi * 2);
-    u32 hi_read = ioapic_read(IOAPIC_REDTBL + gsi * 2 + 1);
+    u32 lo_read = ioapic_read(IOAPIC_REDTBL_LO(gsi));
+    u32 hi_read = ioapic_read(IOAPIC_REDTBL_HI(gsi));
     printf("IOAPIC: lo=0x%x hi=0x%x\r\n", lo_read, hi_read);
 }
 
 void ioapic_mask_irq(u8 irq) {
     u32 gsi = irq_to_gsi(irq);
-    u32 lo = ioapic_read(IOAPIC_REDTBL + gsi * 2);
-    lo |= (1 << 16);
-    ioapic_write(IOAPIC_REDTBL + gsi * 2, lo);
+    u32 lo = ioapic_read(IOAPIC_REDTBL_LO(gsi));
+    lo |= IOAPIC_REDTBL_MASKED;
+    ioapic_write(IOAPIC_REDTBL_LO(gsi), lo);
 }
 
 void ioapic_unmask_irq(u8 irq) {
     u32 gsi = irq_to_gsi(irq);
-    u32 lo = ioapic_read(IOAPIC_REDTBL + gsi * 2);
-    lo &= ~(1 << 16);
-    ioapic_write(IOAPIC_REDTBL + gsi * 2, lo);
+    u32 lo = ioapic_read(IOAPIC_REDTBL_LO(gsi));
+    lo &= ~IOAPIC_REDTBL_MASKED;
+    ioapic_write(IOAPIC_REDTBL_LO(gsi), lo);
 }
 
 // PIT (Programmable Interval Timer)
-#define PIT_FREQ 1193182
-#define PIT_CMD  0x43
-#define PIT_CH0  0x40
-
 void pit_init(u32 hz) {
     u16 divisor = PIT_FREQ / hz;
-    outb(PIT_CMD, 0x36);            // channel 0, lobyte/hibyte, square wave
+    outb(PIT_CMD, PIT_CMD_CH0_SQUARE);
     outb(PIT_CH0, divisor & 0xFF);
     outb(PIT_CH0, (divisor >> 8) & 0xFF);
 }
 
 void pit_stop(void) {
-    outb(PIT_CMD, 0x30);            // channel 0, lobyte/hibyte, mode 0
+    outb(PIT_CMD, PIT_CMD_CH0_ONESHOT);
     outb(PIT_CH0, 0);
     outb(PIT_CH0, 0);
 }
@@ -219,13 +212,13 @@ void pit_stop(void) {
 #define LAPIC_TIMER_MASKED   0x10000
 
 void lapic_timer_init(u8 vector, u32 initial_count) {
-    lapic_write(LAPIC_TIMER_DIV, 0x3);      // divide by 16
+    lapic_write(LAPIC_TIMER_DIV, LAPIC_TIMER_DIV_16);
     lapic_write(LAPIC_TIMER, vector);        // one-shot mode
     lapic_write(LAPIC_TIMER_INIT, initial_count);
 }
 
 void lapic_timer_periodic(u8 vector, u32 initial_count) {
-    lapic_write(LAPIC_TIMER_DIV, 0x3);      // divide by 16
+    lapic_write(LAPIC_TIMER_DIV, LAPIC_TIMER_DIV_16);
     lapic_write(LAPIC_TIMER, vector | LAPIC_TIMER_PERIODIC);
     lapic_write(LAPIC_TIMER_INIT, initial_count);
 }

@@ -50,48 +50,60 @@ struct RSDT {
     u32 SDTptrs[];
 };
 
+// MADT entry header (common to all entry types)
+struct madt_entry_header {
+    u8 type;
+    u8 length;
+} __attribute__((packed));
+
+// MADT entry type 0: Local APIC
+struct madt_entry_lapic {
+    struct madt_entry_header h;
+    u8 cpu_id;
+    u8 apic_id;
+    u32 flags;
+} __attribute__((packed));
+
+// MADT entry type 1: I/O APIC
+struct madt_entry_ioapic {
+    struct madt_entry_header h;
+    u8 id;
+    u8 _reserved0;
+    u32 addr;
+    u32 gsi_base;
+} __attribute__((packed));
+
+// MADT entry type 2: Interrupt Source Override
+struct madt_entry_iso {
+    struct madt_entry_header h;
+    u8 bus;
+    u8 source;
+    u32 gsi;
+    u16 flags;
+} __attribute__((packed));
+
+// MADT entry type 4: NMI Source
+struct madt_entry_nmi {
+    struct madt_entry_header h;
+    u8 nmi_source;
+    u8 _reserved0;
+    u16 flags;
+    u8 lint;
+} __attribute__((packed));
+
+// MADT entry type 5: Local APIC Address Override
+struct madt_entry_lapic_override {
+    struct madt_entry_header h;
+    u16 _reserved0;
+    u64 lapic_addr;
+} __attribute__((packed));
+
 struct MADT {
     struct ACPISDTHeader h;
     u32 local_apic_addr;
     u32 flags;
-    struct {
-        u8 type;
-        u8 length;
-        union {
-            struct {
-                u8 cpuID;
-                u8 apicID;
-                u32 flags;
-            } localAPIC;
-            struct {
-                u8 io_apicID;
-                u8 _;
-                u32 io_apic_addr;
-                u32 global_system_int_base;
-            } ioAPIC;
-            struct {
-                u8 bus_source;
-                u8 irq_source;
-                u32 global_system_int;
-                u16 flags;
-            } ioAPIC_override;
-            struct {
-                u8 nmi_source;
-                u16 flags;
-                u8 lint;
-            } ioAPIC_nmi;
-            struct {
-                u16 _;
-                u64 localAPIC_addr;
-            } localAPIC_override;
-            struct {
-                u16 _;
-                u32 apicID;
-                u32 flags;
-                u32 acpiID;
-            } processorAPIC;
-        } data;
-    } entries[];
+    // Variable-length entries follow; use MADT_ENTRIES_OFFSET to access
+    u8 entries[];
 };
 
 struct GenericAddressStructure {

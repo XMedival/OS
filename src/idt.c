@@ -3,9 +3,20 @@
 #include "x86.h"
 #include "apic.h"
 #include "panic.h"
+#include "ps2.h"
+#include "fat.h"
 
 static struct idt_entry idt[IDT_ENTRIES];
 static struct idt_ptr idtr;
+
+void timer_handler() {
+    static u32 ticks = 0;
+    ticks++;
+
+    if ((ticks % 5000) == 0) {
+        fat_flush_dirty();
+    }        
+}    
 
 // Common handler that all stubs jump to
 __attribute__((naked)) void isr_common(void) {
@@ -171,7 +182,7 @@ static void (*isr_table[48])(void) = {
 
 void idt_set_gate(u8 num, u64 handler, u8 type) {
     idt[num].offset_1 = handler & 0xFFFF;
-    idt[num].selector = 0x28;
+    idt[num].selector = KERNEL_CS;
     idt[num].ist = 0;
     idt[num].type_attr = type;
     idt[num].offset_2 = (handler >> 16) & 0xFFFF;
@@ -211,12 +222,13 @@ static const char scancode_table[128] = {
 
 void exception_handler(struct trap_frame *frame) {
     switch (frame->int_no) {
-    case 32:  // Timer
+    case IRQ_TIMER:
         lapic_eoi();
+	timer_handler();
         break;
-    case 33: {  // Keyboard
-        u8 scancode = inb(0x60);
-        if (!(scancode & 0x80)) {  // key press (not release)
+    case IRQ_KEYBOARD: {
+        u8 scancode = inb(PS2_DATA_PORT);
+        if (!(scancode & SCANCODE_RELEASE_BIT)) {  // key press (not release)
             char c = scancode_table[scancode];
             if (c) {
                 putc(c);

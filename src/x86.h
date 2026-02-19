@@ -2,23 +2,6 @@
 #define X86_H
 #include "types.h"
 
-#define ISR_STUB(num)				\
-  __attribute((naked)) void isr##num(void) {	\
-    asm volatile(				\
-    "push $0\n"					\
-    "push $" #num "\n"				\
-    "jmp isr_common\n"				\
-    );						\
-  }
-
-#define ISR_STUB_ERR(num)			\
-  __attribute((naked)) void isr##num(void) {	\
-    asm volatile(				\
-    "push $" #num "\n"				\
-    "jmp isr_common\n"				\
-    );						\
-  }
-
 static inline void outb(u16 port, u8 data) {
   asm volatile("outb %b0, %w1" : : "a"(data), "Nd"(port) : "memory");
 }

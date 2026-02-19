@@ -16,7 +16,7 @@ struct spinlock {
 };
 
 // per-cpu storage (simplified: single CPU for now)
-static struct cpu boot_cpu;
+extern struct cpu boot_cpu;
 
 static inline struct cpu* mycpu(void) {
   return &boot_cpu;

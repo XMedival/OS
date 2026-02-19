@@ -135,7 +135,16 @@ struct hba_port {
 
 // Port SSTS (SATA Status)
 #define HBA_PORT_SSTS_DET(x)  ((x) & 0xF)        // Device Detection
+#define HBA_PORT_SSTS_IPM(x)  (((x) >> 8) & 0xF) // Interface Power Management
 #define HBA_PORT_SSTS_DET_PRESENT  0x3           // Device present & PHY
+#define HBA_PORT_SSTS_IPM_ACTIVE   0x1           // Interface active
+
+// Port IS (Interrupt Status) bits
+#define HBA_PORT_IS_TFES       (1 << 30)         // Task File Error Status
+
+// Port SCTL bits
+#define SCTL_DET_MASK          0xF               // Device Detection Init mask
+#define SCTL_DET_COMRESET      0x1               // Perform COMRESET
 
 // Port signatures
 #define SATA_SIG_ATA    0x00000101  // SATA drive
@@ -250,6 +259,22 @@ struct hba_received_fis {
 #define ATA_CMD_IDENTIFY       0xEC
 
 #define ATA_DEV_LBA            (1 << 6)
+#define ATA_SECTOR_SIZE_DEFAULT  512
+
+// IDENTIFY data offsets (word indices)
+#define ATA_ID_MODEL           27   // Words 27-46: Model string
+#define ATA_ID_LBA48_SECTORS   100  // Words 100-103: LBA48 sector count
+#define ATA_ID_SECTOR_SIZE     106  // Word 106: Physical/Logical sector size
+#define ATA_ID_LOGICAL_SIZE    117  // Words 117-118: Logical sector size (if word 106 bit 12 set)
+
+// IDENTIFY data offsets (in bytes)
+#define ATA_IDENTIFY_MODEL_OFFSET   (ATA_ID_MODEL * 2)        // Bytes 54-93
+#define ATA_IDENTIFY_LBA48_OFFSET   (ATA_ID_LBA48_SECTORS * 2) // Bytes 200-207
+
+// Word 106 bits (Physical/Logical Sector Size)
+#define ATA_ID_W106_VALID          (1 << 14)  // Word 106 is valid
+#define ATA_ID_W106_LOGICAL_GT512  (1 << 12)  // Logical sector > 512 bytes
+#define ATA_ID_W106_MULTI_LOGICAL  (1 << 13)  // Multiple logical per physical
 
 // ============================================================================
 // AHCI Driver Functions
@@ -276,11 +301,43 @@ int  ahci_write(struct hba_port *port, u64 lba, u32 count, const void *buf);
 int  ahci_find_slot(struct hba_port *port);        // Find free command slot (-1 if none)
 int  ahci_issue(struct hba_port *port, int slot);  // Issue cmd, wait for completion
 
+// Helper: Set LBA48 address in FIS
+static inline void fis_set_lba48(struct fis_reg_h2d *fis, u64 lba) {
+    fis->lba0 = (u8)(lba);
+    fis->lba1 = (u8)(lba >> 8);
+    fis->lba2 = (u8)(lba >> 16);
+    fis->lba3 = (u8)(lba >> 24);
+    fis->lba4 = (u8)(lba >> 32);
+    fis->lba5 = (u8)(lba >> 40);
+}
+
+// Helper: Clear port interrupt status
+static inline void ahci_port_clear_interrupts(struct hba_port *port) {
+    port->is = (u32)-1;
+}
+
 // Device types returned by ahci_port_type()
 #define AHCI_DEV_NULL   0
 #define AHCI_DEV_SATA   1
 #define AHCI_DEV_SATAPI 2
 #define AHCI_DEV_SEMB   3
 #define AHCI_DEV_PM     4
+
+// Per-port device information
+struct ahci_port_info {
+    u32 sector_size;      // Logical sector size in bytes
+    u64 sector_count;     // Total sectors (LBA48)
+    char model[41];       // Model string (null-terminated)
+};
+
+// First SATA port found (set by ahci_init)
+extern struct hba_port *ahci_sata_port;
+extern struct ahci_port_info ahci_sata_info;  // Info for first SATA port
+
+// Get sector size for a port (returns 0 if not initialized)
+u32 ahci_get_sector_size(struct hba_port *port);
+
+// Parse IDENTIFY data and fill port info
+void ahci_parse_identify(u8 *id, struct ahci_port_info *info);
 
 #endif
