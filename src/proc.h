@@ -50,4 +50,7 @@ struct proc *proc_create(const char *path);
 // The current running process (NULL if in scheduler)
 extern struct proc *current_proc;
 
+// Get scheduler context pointer (for syscall exit path)
+struct context **cpu_context_ptr(void);
+
 #endif

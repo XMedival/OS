@@ -5,11 +5,17 @@
 #include "idt.h"
 #include "mem.h"
 #include "print.h"
+#include "syscall.h"
 #include "x86.h"
 
 struct proc proc_table[MAX_PROCS];
 struct proc *current_proc;
 static struct context *cpu_context;  // scheduler's saved context
+
+struct context **cpu_context_ptr(void) {
+    return &cpu_context;
+}
+
 static u32 next_pid = 1;
 
 static struct proc *proc_alloc(void) {
@@ -169,6 +175,10 @@ void scheduler(void) {
             // Switch to process address space
             lcr3(VIRT_TO_PHYS((u64)p->pml4));
             tss_set_rsp0((u64)p->kstack + KSTACK_SIZE);
+
+            // Set kernel stack for syscall entry
+            extern u64 kernel_rsp;
+            kernel_rsp = (u64)p->kstack + KSTACK_SIZE;
 
             swtch(&cpu_context, p->context);
 

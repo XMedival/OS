@@ -30,8 +30,8 @@ $(BUILDDIR)/%.o: $(SRCDIR)/%.S | $(BUILDDIR)
 $(KERNEL): $(C_OBJS) $(S_OBJS) | $(BUILDDIR)
 	@$(LD) $(LDFLAGS) -T $(LDSCRIPT) -o $@ $^
 
-$(BUILDDIR)/test.elf: $(USERDIR)/test.c $(USERDIR)/user.ld | $(BUILDDIR)
-	@$(CC) $(USER_CFLAGS) -T $(USERDIR)/user.ld -o $@ $<
+$(BUILDDIR)/test.elf: $(USERDIR)/test.c $(USERDIR)/syscall.h $(USERDIR)/user.ld | $(BUILDDIR)
+	@$(CC) $(USER_CFLAGS) -I$(USERDIR) -T $(USERDIR)/user.ld -o $@ $<
 
 $(DISK): $(KERNEL) $(USER_PROGS) | limine
 	@dd if=/dev/zero bs=1M count=64 of=$@

@@ -60,6 +60,18 @@ static inline u64 rcr3(void) {
   return val;
 }
 
+static inline void wrmsr(u32 msr, u64 val) {
+  u32 lo = (u32)val;
+  u32 hi = (u32)(val >> 32);
+  asm volatile("wrmsr" : : "c"(msr), "a"(lo), "d"(hi));
+}
+
+static inline u64 rdmsr(u32 msr) {
+  u32 lo, hi;
+  asm volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
+  return ((u64)hi << 32) | lo;
+}
+
 static inline u8 xchg(volatile u8 *addr, u8 newval) {
   u8 result = newval;
   asm volatile("lock; xchgb %0, %1"

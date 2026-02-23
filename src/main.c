@@ -12,6 +12,7 @@
 #include "proc.h"
 #include "ps2.h"
 #include "serial.h"
+#include "syscall.h"
 #include "types.h"
 #include "x86.h"
 #include "pci.h"
@@ -73,6 +74,9 @@ void kmain(void) {
 
     init_gdt();
     puts("[ OK ] GDT initialized\r\n");
+
+    init_syscall();
+    puts("[ OK ] Syscalls initialized\r\n");
 
     // Start APs (Application Processors)
     struct limine_mp_response *mp_response = mp_request.response;
