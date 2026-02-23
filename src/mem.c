@@ -4,17 +4,32 @@
 
 u64 hhdm_offset;
 
+// ---------------------------------------------------------------------------
+// Binary buddy allocator
+// order N manages blocks of 2^N pages (2^N * PAGE_SIZE bytes).
+// MAX_ORDER-1 is the largest order (2^10 = 1024 pages = 4 MB).
+// ---------------------------------------------------------------------------
+#define MAX_ORDER 11
+
 struct run {
   struct run *next;
 };
 
-struct kmem_state {
+struct buddy_state {
   struct spinlock lock;
   u8 use_lock;
-  struct run *freelist;
+  struct run *free_lists[MAX_ORDER];
 };
 
-static struct kmem_state kmem;
+static struct buddy_state buddy;
+
+// Return smallest order o such that 2^o >= n (n > 0)
+static u64 order_for(u64 n) {
+  u64 o = 0;
+  u64 size = 1;
+  while (size < n) { size <<= 1; o++; }
+  return o;
+}
 
 void *memset(void *dst, int c, u64 n) {
   u8 *d = (u8 *)dst;
@@ -26,107 +41,101 @@ void *memset(void *dst, int c, u64 n) {
 
 void kinit(u64 hhdm) {
   hhdm_offset = hhdm;
-  initlock(&kmem.lock, "kmem");
-  kmem.use_lock = 0;
-  kmem.freelist = 0;
+  initlock(&buddy.lock, "buddy");
+  buddy.use_lock = 0;
+  for (int i = 0; i < MAX_ORDER; i++)
+    buddy.free_lists[i] = 0;
+}
+
+// Remove block at address `addr` from free_lists[order]. Returns 1 if found.
+static int buddy_remove(u64 addr, u64 order) {
+  struct run **pp = &buddy.free_lists[order];
+  while (*pp) {
+    if ((u64)*pp == addr) {
+      *pp = (*pp)->next;
+      return 1;
+    }
+    pp = &(*pp)->next;
+  }
+  return 0;
 }
 
 void kfree(void *v, u64 npages) {
   if ((u64)v % PAGE_SIZE || npages == 0)
     return;
 
-  if (kmem.use_lock)
-    acquire(&kmem.lock);
+  u64 order = order_for(npages);
+  if (order >= MAX_ORDER)
+    order = MAX_ORDER - 1;
 
-  for (u64 i = 0; i < npages; i++) {
-    void *page = (void *)((u64)v + i * PAGE_SIZE);
-    memset(page, MEM_FREE_PATTERN, PAGE_SIZE);
-    struct run *r = (struct run *)page;
-    r->next = kmem.freelist;
-    kmem.freelist = r;
+  u64 block_pages = (u64)1 << order;
+
+  memset(v, MEM_FREE_PATTERN, block_pages * PAGE_SIZE);
+
+  if (buddy.use_lock)
+    acquire(&buddy.lock);
+
+  u64 addr = (u64)v;
+
+  // Walk up merging with buddy
+  while (order < MAX_ORDER - 1) {
+    u64 buddy_addr = addr ^ (PAGE_SIZE << order);
+    if (!buddy_remove(buddy_addr, order))
+      break;
+    // Merged: the new block starts at the lower address
+    if (buddy_addr < addr)
+      addr = buddy_addr;
+    order++;
   }
 
-  if (kmem.use_lock)
-    release(&kmem.lock);
+  struct run *r = (struct run *)addr;
+  r->next = buddy.free_lists[order];
+  buddy.free_lists[order] = r;
+
+  if (buddy.use_lock)
+    release(&buddy.lock);
 }
 
-// Find and remove n contiguous pages from freelist
-// Returns pointer to first page, or NULL if not found
 void *kalloc(u64 npages) {
   if (npages == 0)
     return 0;
 
-  if (kmem.use_lock)
-    acquire(&kmem.lock);
+  u64 order = order_for(npages);
+  if (order >= MAX_ORDER)
+    return 0;
 
-  void *result = 0;
+  if (buddy.use_lock)
+    acquire(&buddy.lock);
 
-  if (npages == 1) {
-    // Fast path for single page
-    struct run *r = kmem.freelist;
-    if (r) {
-      kmem.freelist = r->next;
-      result = (void *)r;
-    }
-  } else {
-    // Multi-page: find n contiguous pages
-    // Walk freelist looking for a run of n consecutive pages
-    struct run *r = kmem.freelist;
+  // Find smallest available order >= requested
+  u64 k = order;
+  while (k < MAX_ORDER && !buddy.free_lists[k])
+    k++;
 
-    while (r) {
-      // Check if next n-1 pages are also free and contiguous
-      u64 base = (u64)r;
-      u64 found = 1;
-
-      for (u64 i = 1; i < npages; i++) {
-        u64 expected = base + i * PAGE_SIZE;
-        // Search entire freelist for this page
-        struct run *search = kmem.freelist;
-        int found_page = 0;
-
-        while (search) {
-          if ((u64)search == expected) {
-            found_page = 1;
-            found++;
-            break;
-          }
-          search = search->next;
-        }
-
-        if (!found_page)
-          break;
-      }
-
-      if (found == npages) {
-        // Found contiguous block - remove all pages from freelist
-        result = (void *)base;
-
-        // Remove each page from the freelist
-        for (u64 i = 0; i < npages; i++) {
-          u64 addr = base + i * PAGE_SIZE;
-          struct run **p = &kmem.freelist;
-          while (*p) {
-            if ((u64)*p == addr) {
-              *p = (*p)->next;
-              break;
-            }
-            p = &(*p)->next;
-          }
-        }
-        break;
-      }
-
-      r = r->next;
-    }
+  if (k == MAX_ORDER) {
+    if (buddy.use_lock)
+      release(&buddy.lock);
+    return 0;
   }
 
-  if (kmem.use_lock)
-    release(&kmem.lock);
+  // Pop block at order k
+  struct run *block = buddy.free_lists[k];
+  buddy.free_lists[k] = block->next;
 
-  if (result)
-    memset(result, MEM_ALLOC_PATTERN, npages * PAGE_SIZE);
+  // Split down to requested order, returning upper halves to free lists
+  while (k > order) {
+    k--;
+    u64 upper = (u64)block + (PAGE_SIZE << k);
+    struct run *r = (struct run *)upper;
+    r->next = buddy.free_lists[k];
+    buddy.free_lists[k] = r;
+  }
 
-  return result;
+  if (buddy.use_lock)
+    release(&buddy.lock);
+
+  memset(block, MEM_ALLOC_PATTERN, npages * PAGE_SIZE);
+  return (void *)block;
 }
 
 void freerange(u64 phys_start, u64 phys_end) {
@@ -136,6 +145,14 @@ void freerange(u64 phys_start, u64 phys_end) {
   for (; p + PAGE_SIZE <= phys_end; p += PAGE_SIZE) {
     kfree(PHYS_TO_VIRT(p), 1);
   }
+}
+
+void *memcpy(void *dst, const void *src, u64 n) {
+  u8 *d = (u8 *)dst;
+  const u8 *s = (const u8 *)src;
+  for (u64 i = 0; i < n; i++)
+    d[i] = s[i];
+  return dst;
 }
 
 // Page table index extraction
@@ -193,4 +210,46 @@ void map_mmio(u64 phys, u64 size) {
     // MMIO: present, writable, cache-disable, write-through
     map_page(virt, p, PTE_PRESENT | PTE_WRITE | PTE_PCD | PTE_PWT);
   }
+}
+
+void map_page_pml4(u64 *pml4, u64 virt, u64 phys, u64 flags) {
+  // Get or create PDPT
+  if (!(pml4[PML4_INDEX(virt)] & PTE_PRESENT)) {
+    u64 new_table = VIRT_TO_PHYS((u64)kalloc(1));
+    memset(PHYS_TO_VIRT(new_table), 0, PAGE_SIZE);
+    pml4[PML4_INDEX(virt)] = new_table | PTE_PRESENT | PTE_WRITE | PTE_USER;
+  }
+  pte_t *pdpt = PHYS_TO_VIRT(pml4[PML4_INDEX(virt)] & PAGE_FRAME_MASK);
+
+  // Get or create PD
+  if (!(pdpt[PDPT_INDEX(virt)] & PTE_PRESENT)) {
+    u64 new_table = VIRT_TO_PHYS((u64)kalloc(1));
+    memset(PHYS_TO_VIRT(new_table), 0, PAGE_SIZE);
+    pdpt[PDPT_INDEX(virt)] = new_table | PTE_PRESENT | PTE_WRITE | PTE_USER;
+  }
+  pte_t *pd = PHYS_TO_VIRT(pdpt[PDPT_INDEX(virt)] & PAGE_FRAME_MASK);
+
+  // Get or create PT
+  if (!(pd[PD_INDEX(virt)] & PTE_PRESENT)) {
+    u64 new_table = VIRT_TO_PHYS((u64)kalloc(1));
+    memset(PHYS_TO_VIRT(new_table), 0, PAGE_SIZE);
+    pd[PD_INDEX(virt)] = new_table | PTE_PRESENT | PTE_WRITE | PTE_USER;
+  }
+  pte_t *pt = PHYS_TO_VIRT(pd[PD_INDEX(virt)] & PAGE_FRAME_MASK);
+
+  // Map the page
+  pt[PT_INDEX(virt)] = (phys & PAGE_FRAME_MASK) | flags | PTE_PRESENT;
+}
+
+u64 *create_user_pml4(void) {
+  u64 *new_pml4 = (u64 *)kalloc(1);
+  if (!new_pml4) return 0;
+  memset(new_pml4, 0, PAGE_SIZE);
+
+  // Copy kernel-space PML4 entries (upper half: 256-511)
+  pte_t *kernel_pml4 = get_pml4();
+  for (int i = 256; i < 512; i++) {
+    new_pml4[i] = kernel_pml4[i];
+  }
+  return new_pml4;
 }

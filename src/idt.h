@@ -26,6 +26,7 @@
 #define IRQ_FPU            45
 #define IRQ_ATA_PRIMARY    46
 #define IRQ_ATA_SECONDARY  47
+#define IRQ_AHCI           48
 
 // ISR stub macros (moved from x86.h for logical grouping)
 #define ISR_STUB(num)                           \

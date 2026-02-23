@@ -1,9 +1,11 @@
 #include "print.h"
+#include "fb.h"
 #include "serial.h"
 #include <stdarg.h>
 
 void putc(char c) {
     serial_putc(c);
+    fb_putc(c);
 }
 
 void puts(const char *s) {

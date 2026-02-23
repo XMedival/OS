@@ -139,7 +139,10 @@ struct hba_port {
 #define HBA_PORT_SSTS_DET_PRESENT  0x3           // Device present & PHY
 #define HBA_PORT_SSTS_IPM_ACTIVE   0x1           // Interface active
 
-// Port IS (Interrupt Status) bits
+// Port IE (Interrupt Enable) bits
+#define HBA_PORT_IE_DHRE   (1 << 0)   // D2H Register FIS interrupt
+#define HBA_PORT_IE_TFEE   (1 << 30)  // Task File Error Enable
+
 #define HBA_PORT_IS_TFES       (1 << 30)         // Task File Error Status
 
 // Port SCTL bits
@@ -293,13 +296,13 @@ void ahci_port_reset(struct hba_port *port);       // COMRESET
 int  ahci_port_type(struct hba_port *port);        // Check device type (ATA/ATAPI/none)
 int  ahci_identify(struct hba_port *port, void *buf);  // IDENTIFY, fills 512-byte buf
 
-// I/O (returns 0 on success, -1 on error)
-int  ahci_read(struct hba_port *port, u64 lba, u32 count, void *buf);
-int  ahci_write(struct hba_port *port, u64 lba, u32 count, const void *buf);
-
 // Low-level
 int  ahci_find_slot(struct hba_port *port);        // Find free command slot (-1 if none)
-int  ahci_issue(struct hba_port *port, int slot);  // Issue cmd, wait for completion
+int  ahci_issue_poll(struct hba_port *port, int slot); // Issue cmd, poll for completion
+void ahci_submit_dma(struct hba_port *port, int slot); // Issue cmd, non-blocking
+
+// IRQ handler (called from IDT vector 48)
+void ahci_irq_handler(void);
 
 // Helper: Set LBA48 address in FIS
 static inline void fis_set_lba48(struct fis_reg_h2d *fis, u64 lba) {

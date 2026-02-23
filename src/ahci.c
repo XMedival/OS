@@ -1,4 +1,5 @@
 #include "ahci.h"
+#include "blk.h"
 #include "pci.h"
 #include "mem.h"
 #include "print.h"
@@ -15,6 +16,7 @@ static struct hba_cmd_header *cmd_lists[32];
 static struct hba_received_fis *fis_areas[32];
 static struct hba_cmd_table *cmd_tables[32][32];  // [port][slot]
 static struct ahci_port_info port_info[32];       // Per-port device info
+static struct blk_device *port_blk[32];           // Block device per port
 
 // ============================================================================
 // Port Control
@@ -155,7 +157,7 @@ int ahci_find_slot(struct hba_port *port) {
     return -1;
 }
 
-int ahci_issue(struct hba_port *port, int slot) {
+int ahci_issue_poll(struct hba_port *port, int slot) {
     // Wait for port to be ready
     while (port->tfd & (HBA_PORT_TFD_BSY | HBA_PORT_TFD_DRQ))
         ;
@@ -163,20 +165,25 @@ int ahci_issue(struct hba_port *port, int slot) {
     // Issue command
     port->ci = (1 << slot);
 
-    // Wait for completion
+    // Poll for completion
     while (1) {
         if (!(port->ci & (1 << slot)))
             break;
-        if (port->is & HBA_PORT_IS_TFES) {  // Task file error
+        if (port->is & HBA_PORT_IS_TFES)
             return -1;
-        }
     }
 
-    // Check for error
     if (port->is & HBA_PORT_IS_TFES)
         return -1;
 
     return 0;
+}
+
+// Non-blocking submit: caller waits via blk_submit_sync / blk_complete
+void ahci_submit_dma(struct hba_port *port, int slot) {
+    while (port->tfd & (HBA_PORT_TFD_BSY | HBA_PORT_TFD_DRQ))
+        ;
+    port->ci = (1 << slot);
 }
 
 // ============================================================================
@@ -253,14 +260,16 @@ int ahci_identify(struct hba_port *port, void *buf) {
     fis->command = ATA_CMD_IDENTIFY;
     fis->device = 0;
 
-    return ahci_issue(port, slot);
+    return ahci_issue_poll(port, slot);
 }
 
 // ============================================================================
-// Read/Write
+// Read/Write (via blk layer)
 // ============================================================================
 
-int ahci_read(struct hba_port *port, u64 lba, u32 count, void *buf) {
+// blk_ops.submit callback: set up PRDT/FIS and fire non-blocking
+static int ahci_submit(struct blk_device *dev, struct blk_request *req) {
+    struct hba_port *port = (struct hba_port *)dev->priv;
     int port_num = get_port_num(port);
     u32 sector_size = port_info[port_num].sector_size;
     if (sector_size == 0) sector_size = ATA_SECTOR_SIZE_DEFAULT;
@@ -271,65 +280,49 @@ int ahci_read(struct hba_port *port, u64 lba, u32 count, void *buf) {
     if (slot < 0) return -1;
 
     struct hba_cmd_header *hdr = &cmd_lists[port_num][slot];
-    hdr->cfl = sizeof(struct fis_reg_h2d) / 4;
-    hdr->w = 0;  // Read
+    hdr->cfl   = sizeof(struct fis_reg_h2d) / 4;
+    hdr->w     = req->write;
     hdr->prdtl = 1;
 
     struct hba_cmd_table *tbl = cmd_tables[port_num][slot];
-
-    // Setup PRDT
-    u64 buf_phys = VIRT_TO_PHYS((u64)buf);
-    tbl->prdt[0].dba = (u32)buf_phys;
+    u64 buf_phys = VIRT_TO_PHYS((u64)req->buf);
+    tbl->prdt[0].dba  = (u32)buf_phys;
     tbl->prdt[0].dbau = (u32)(buf_phys >> 32);
-    tbl->prdt[0].dbc = (count * sector_size) - 1;
-    tbl->prdt[0].i = 1;
+    tbl->prdt[0].dbc  = (req->count * sector_size) - 1;
+    tbl->prdt[0].i    = 1;
 
-    // Setup command FIS
     struct fis_reg_h2d *fis = (struct fis_reg_h2d *)tbl->cfis;
     fis->fis_type = FIS_TYPE_REG_H2D;
-    fis->flags = FIS_H2D_CMD;
-    fis->command = ATA_CMD_READ_DMA_EXT;
-    fis_set_lba48(fis, lba);
+    fis->flags    = FIS_H2D_CMD;
+    fis->command  = req->write ? ATA_CMD_WRITE_DMA_EXT : ATA_CMD_READ_DMA_EXT;
+    fis_set_lba48(fis, req->lba);
     fis->device = ATA_DEV_LBA;
-    fis->count = (u16)count;
+    fis->count  = (u16)req->count;
 
-    return ahci_issue(port, slot);
+    ahci_submit_dma(port, slot);
+    return 0;
 }
 
-int ahci_write(struct hba_port *port, u64 lba, u32 count, const void *buf) {
-    int port_num = get_port_num(port);
-    u32 sector_size = port_info[port_num].sector_size;
-    if (sector_size == 0) sector_size = ATA_SECTOR_SIZE_DEFAULT;
+// ============================================================================
+// IRQ handler (called from vector 48 — AHCI MSI)
+// ============================================================================
 
-    ahci_port_clear_interrupts(port);
+void ahci_irq_handler(void) {
+    u32 global_is = hba->is;
 
-    int slot = ahci_find_slot(port);
-    if (slot < 0) return -1;
+    for (int i = 0; i < 32; i++) {
+        if (!(global_is & (1u << i))) continue;
 
-    struct hba_cmd_header *hdr = &cmd_lists[port_num][slot];
-    hdr->cfl = sizeof(struct fis_reg_h2d) / 4;
-    hdr->w = 1;  // Write
-    hdr->prdtl = 1;
+        struct hba_port *port = &hba->ports[i];
+        u32 port_is = port->is;
+        port->is = port_is;        // clear port interrupt status
+        hba->is  = (1u << i);     // clear global interrupt status
 
-    struct hba_cmd_table *tbl = cmd_tables[port_num][slot];
+        i32 status = (port_is & HBA_PORT_IS_TFES) ? -1 : 0;
 
-    // Setup PRDT
-    u64 buf_phys = VIRT_TO_PHYS((u64)buf);
-    tbl->prdt[0].dba = (u32)buf_phys;
-    tbl->prdt[0].dbau = (u32)(buf_phys >> 32);
-    tbl->prdt[0].dbc = (count * sector_size) - 1;
-    tbl->prdt[0].i = 1;
-
-    // Setup command FIS
-    struct fis_reg_h2d *fis = (struct fis_reg_h2d *)tbl->cfis;
-    fis->fis_type = FIS_TYPE_REG_H2D;
-    fis->flags = FIS_H2D_CMD;
-    fis->command = ATA_CMD_WRITE_DMA_EXT;
-    fis_set_lba48(fis, lba);
-    fis->device = ATA_DEV_LBA;
-    fis->count = (u16)count;
-
-    return ahci_issue(port, slot);
+        if (port_blk[i])
+            blk_complete(port_blk[i], status);
+    }
 }
 
 // ============================================================================
@@ -341,7 +334,7 @@ void ahci_init(void) {
     ahci_dev = 0;
     for (u32 i = 0; i < pci_device_count; i++) {
         struct pci_device *dev = &pci_devices[i];
-        if (dev->class_code == PCI_CLASS_STORAGE && dev->subclass == PCI_SUBCLASS_AHCI) {
+        if (dev->hdr.general.h.class_code == PCI_CLASS_STORAGE && dev->hdr.general.h.subclass == PCI_SUBCLASS_AHCI) {
             ahci_dev = dev;
             break;
         }
@@ -352,7 +345,7 @@ void ahci_init(void) {
         return;
     }
 
-    printf("AHCI: Found controller at %u:%u\r\n", ahci_dev->bus, ahci_dev->slot);
+    printf("AHCI: Found controller at %u:%u.%u\r\n", ahci_dev->bus, ahci_dev->slot, ahci_dev->func);
 
     // Read BAR5 (ABAR)
     u64 abar_phys = pci_read_bar(ahci_dev->bus, ahci_dev->slot, ahci_dev->func, 5);
@@ -404,6 +397,9 @@ void ahci_init(void) {
             if (!ahci_sata_port)
                 ahci_sata_port = port;
 
+            // Enable port interrupts (D2H register FIS + task file error)
+            port->ie = HBA_PORT_IE_DHRE | HBA_PORT_IE_TFEE;
+
             // Identify the drive
             u8 *id = kalloc(1);
             if (id && ahci_identify(port, id) == 0) {
@@ -417,13 +413,25 @@ void ahci_init(void) {
                        (u32)(info->sector_count * info->sector_size / (1024 * 1024)));
 
                 // Copy to global info if this is the first SATA port
-                if (port == ahci_sata_port) {
+                if (port == ahci_sata_port)
                     ahci_sata_info = *info;
-                }
+
+                // Register as block device "ahci0", "ahci1", etc.
+                char name[BLK_NAME_LEN] = "ahci0";
+                name[4] = '0' + i;
+                struct blk_ops ops = { .submit = ahci_submit };
+                port_blk[i] = blk_register(name, ops,
+                                            port_info[port_num].sector_size,
+                                            port);
+                if (port_blk[i])
+                    printf("[ OK ] AHCI: registered block device '%s'\r\n", name);
             }
             if (id) kfree(id, 1);
         }
     }
+
+    // Enable global AHCI interrupts
+    hba->ghc |= HBA_GHC_IE;
 
     puts("[ OK ] AHCI initialized\r\n");
 }

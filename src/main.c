@@ -1,9 +1,16 @@
 #include "acpi.h"
 #include "apic.h"
+#include "ata.h"
+#include "blk.h"
+#include "fb.h"
+#include "gdt.h"
 #include "idt.h"
 #include "limine.h"
 #include "mem.h"
+#include "panic.h"
 #include "print.h"
+#include "proc.h"
+#include "ps2.h"
 #include "serial.h"
 #include "types.h"
 #include "x86.h"
@@ -64,6 +71,9 @@ void kmain(void) {
 
     puts("[ OK ] Memory initialized\r\n");
 
+    init_gdt();
+    puts("[ OK ] GDT initialized\r\n");
+
     // Start APs (Application Processors)
     struct limine_mp_response *mp_response = mp_request.response;
     if (mp_response) {
@@ -99,13 +109,8 @@ void kmain(void) {
     ioapic_init();
     puts("IOAPIC done\r\n");
 
-    // Draw something on framebuffer
-    struct limine_framebuffer *framebuffer =
-        framebuffer_request.response->framebuffers[0];
-    for (u32 i = 0; i < 100; i++) {
-        volatile u32 *fb_ptr = framebuffer->address;
-        fb_ptr[1 * (framebuffer->width) + i] = 0xFFFFFFFF;
-    }
+    // Initialize framebuffer console (before any puts so output appears on screen)
+    fb_init(framebuffer_request.response->framebuffers[0]);
 
     puts("[ OK ] Kernel initialized!\r\n");
 
@@ -116,44 +121,32 @@ void kmain(void) {
     pit_stop();
     lapic_timer_periodic(32, 1000000);
     ioapic_route_irq(1, 33, lapic_id());
+    ioapic_route_irq(12, 44, lapic_id());   // PS/2 mouse IRQ
+    ioapic_route_irq(14, 46, lapic_id());   // ATA primary IRQ
+    ioapic_route_irq(15, 47, lapic_id());   // ATA secondary IRQ
 
-    // Enable keyboard interrupts on PS/2 controller
-    while (inb(0x64) & 0x02);  // wait for input buffer empty
-    outb(0x64, 0x20);          // read controller config
-    while (!(inb(0x64) & 0x01)); // wait for output buffer full
-    u8 config = inb(0x60);
-    config |= 0x01;            // enable keyboard interrupt
-    while (inb(0x64) & 0x02);  // wait for input buffer empty
-    outb(0x64, 0x60);          // write controller config
-    while (inb(0x64) & 0x02);
-    outb(0x60, config);
+    ps2_init();
 
-    puts("Keyboard enabled\r\n");
+    sti();
 
     pci_scan();
 
     ahci_init();
+    // ata is currently broken, hangs on the second read
+    // ata_init();
 
-    fat_init();
-
-    sti();
+    struct blk_device *boot_dev = blk_get("ahci0");
+    if (!boot_dev) boot_dev = blk_get("ata0");
+    if (!boot_dev) panic("CANNOT GET A DRIVER FOR THE BOOT DEVICE");
+    fat_init(boot_dev);
 
     puts("Waiting for keyboard...\r\n");
 
-    struct fat_dir_entry file;
-    // Test LFN support with limine.conf
-    if (fat_open("/boot/limine/limine.conf", &file) == 0) {
-        printf("Found limine.conf! size=%u\r\n", file.file_size);
-        char buf[512];
-        u32 read = fat_read(&file, 0, 511, buf);
-        buf[read] = '\0';
-        puts("Contents:\r\n");
-        puts(buf);
-    } else {
-        puts("Could not open limine.conf\r\n");
-    }        
+    // Create processes from ELF files on disk
+    proc_create("/test.elf");
+    proc_create("/test.elf");
 
-    for (;;) {
-        hlt();
-    }
+    puts("[ OK ] Entering scheduler\r\n");
+    scheduler();
+    // scheduler never returns
 }

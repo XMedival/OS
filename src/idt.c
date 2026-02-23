@@ -4,7 +4,10 @@
 #include "apic.h"
 #include "panic.h"
 #include "ps2.h"
+#include "ahci.h"
+#include "ata.h"
 #include "fat.h"
+#include "proc.h"
 
 static struct idt_entry idt[IDT_ENTRIES];
 static struct idt_ptr idtr;
@@ -15,7 +18,9 @@ void timer_handler() {
 
     if ((ticks % 5000) == 0) {
         fat_flush_dirty();
-    }        
+    }
+
+    yield();
 }    
 
 // Common handler that all stubs jump to
@@ -41,6 +46,11 @@ __attribute__((naked)) void isr_common(void) {
         // Call C handler with frame pointer
         "mov %rsp, %rdi\n"
         "call exception_handler\n"
+
+        // trapret: restores registers and returns to user/kernel mode
+        // Also used as entry point for newly created processes
+        ".globl trapret\n"
+        "trapret:\n"
 
         // Restore all registers
         "pop %r15\n"
@@ -115,8 +125,9 @@ ISR_STUB(42)
 ISR_STUB(43)
 ISR_STUB(44)
 ISR_STUB(45)
-ISR_STUB(46)
-ISR_STUB(47)
+ISR_STUB(46)  // ATA primary
+ISR_STUB(47)  // ATA secondary
+ISR_STUB(48)  // AHCI MSI
 
 // Spurious interrupt handler (no EOI needed)
 __attribute__((naked)) void isr_spurious(void) {
@@ -172,13 +183,14 @@ extern void isr44(void);
 extern void isr45(void);
 extern void isr46(void);
 extern void isr47(void);
+extern void isr48(void);
 
-static void (*isr_table[48])(void) = {
+static void (*isr_table[49])(void) = {
     isr0,  isr1,  isr2,  isr3,  isr4,  isr5,  isr6,  isr7,  isr8,  isr9,  isr10,
     isr11, isr12, isr13, isr14, isr15, isr16, isr17, isr18, isr19, isr20, isr21,
     isr22, isr23, isr24, isr25, isr26, isr27, isr28, isr29, isr30, isr31,
     isr32, isr33, isr34, isr35, isr36, isr37, isr38, isr39, isr40, isr41,
-    isr42, isr43, isr44, isr45, isr46, isr47};
+    isr42, isr43, isr44, isr45, isr46, isr47, isr48};
 
 void idt_set_gate(u8 num, u64 handler, u8 type) {
     idt[num].offset_1 = handler & 0xFFFF;
@@ -199,8 +211,8 @@ void init_idt(void) {
         idt_set_gate(i, 0, 0);
     }
 
-    // Set up exception handlers (0-31) and IRQ handlers (32-47)
-    for (u32 i = 0; i < 48; i++) {
+    // Set up exception handlers (0-31) and IRQ handlers (32-48)
+    for (u32 i = 0; i < 49; i++) {
         idt_set_gate(i, (u64)isr_table[i], IDT_INTERRUPT_GATE);
     }
 
@@ -237,12 +249,86 @@ void exception_handler(struct trap_frame *frame) {
         lapic_eoi();
         break;
     }
-    case 0:
-        panic("DIVISION ERROR", frame);
-    case 8:
+    case IRQ_MOUSE: {
+        static u8 mouse_buf[3];
+        static u8 mouse_idx = 0;
+        mouse_buf[mouse_idx++] = inb(PS2_DATA_PORT);
+        if (mouse_idx == 3) {
+            mouse_idx = 0;
+            // Only process if packet is valid (bit 3 of byte 0 must be set)
+            if (mouse_buf[0] & (1 << 3)) {
+                i8 dx = (i8)mouse_buf[1];
+                i8 dy = (i8)mouse_buf[2];
+                u8 buttons = mouse_buf[0] & 0x07;
+                printf("Mouse: dx=%d dy=%d btn=%u\r\n", (i32)dx, (i32)dy, (u32)buttons);
+            }
+        }
+        lapic_eoi();
+        break;
+    }
+    case IRQ_ATA_PRIMARY:
+        ata_irq_handler(0);
+        lapic_eoi();
+        break;
+    case IRQ_ATA_SECONDARY:
+        ata_irq_handler(1);
+        lapic_eoi();
+        break;
+    case IRQ_AHCI:
+        ahci_irq_handler();
+        lapic_eoi();
+        break;
+    case 0x0:
+      panic("DIVISION ERROR", frame);
+    case 0x1:
+        panic("DEBUG?", frame);
+    case 0x2:
+        panic("NMI", frame);
+    case 0x3:
+        panic("BREAKPOINT", frame);
+    case 0x4:
+        panic("OVERFLOW", frame);
+    case 0x5:
+        panic("BOUND RANGE", frame);
+    case 0x6:
+        panic("INVALID OPCODE", frame);
+    case 0x7:
+      panic("DEVICE NOT AVAILABLE", frame);
+    case 0x8:
         panic("DOUBLE FAULT", frame);
-    case 18:
-      panic("MACHINE CHECK",frame);
+    case 0x9:
+        panic("WHY ARE WE HERE?!?! COPROCESSOR", frame);
+    case 0xA:
+        panic("INVALID TSS", frame);
+    case 0xB:
+        panic("SEGMENT NOT PRESENT", frame);
+    case 0xC:
+        panic("STACK-SEGMENT FAULT", frame);
+    case 0xD:
+        panic("GENERAL PROTECTION FAULT", frame);
+    case 0xE:
+        panic("PAGE FAULT", frame);
+	// 0xF is reserved
+    case 0x10:
+        panic("x87 FPU EXCEPTION", frame);
+    case 0x11:
+        panic("ALIGNMENT CHECK", frame);
+    case 0x12:
+        panic("MACHINE CHECK", frame);
+    case 0x13:
+        panic("SIMD FPU EXCEPTION", frame);
+    case 0x14:
+        panic("VIRT EXCEPTION", frame);
+    case 0x15:
+        panic("CONTROL PROTECTION EXCEPTION", frame);
+        // 0x16..0x1B are reserved
+    case 0x1C:
+        panic("HYPERVISOR INJECTION", frame);
+    case 0x1D:
+        panic("VMM COMM EXCEPTION", frame);
+    case 0x1E:
+        panic("SECURITY EXCEPTION", frame);
+	// 0x1F is reserved
     default:
       panic(0, frame);
     }

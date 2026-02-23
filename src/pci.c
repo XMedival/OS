@@ -128,24 +128,95 @@ void pci_msi_disable(struct pci_device *dev) {
     pci_write16(dev->bus, dev->slot, dev->func, cap + 2, ctrl);
 }
 
-void pci_scan(void) {
-    for (u16 bus = 0; bus < 256; bus++) {
-        for (u8 slot = 0; slot < 32; slot++) {
-            u16 vendor = pci_read16(bus, slot, 0, 0);
-            if (vendor == 0xFFFF)
-                continue;
+void pci_read_general_header(u8 bus, u8 slot, u8 func,
+                             struct pci_general_header *out) {
+    u32 *p = (u32 *)out;
+    for (u8 i = 0; i < sizeof(*out) / 4; i++)
+        p[i] = pci_read32(bus, slot, func, i * 4);
+}
 
-            struct pci_device *dev = &pci_devices[pci_device_count++];
-            dev->bus = bus;
-            dev->slot = slot;
-            dev->func = 0;
-            dev->vendor_id = vendor;
-            dev->device_id = pci_read16(bus, slot, 0, 2);
-            dev->class_code = pci_read8(bus, slot, 0, 0x0B);
-            dev->subclass = pci_read8(bus, slot, 0, 0x0A);
-            printf("[ PCI ] %u:%u vendor=%X device=%X class=%x:%x\r\n",
-                   bus, slot, dev->vendor_id, dev->device_id,
-                   dev->class_code, dev->subclass);
-            }
+void pci_read_bridge_header(u8 bus, u8 slot, u8 func,
+                            struct pci_bridge_header *out) {
+    u32 *p = (u32 *)out;
+    for (u8 i = 0; i < sizeof(*out) / 4; i++)
+        p[i] = pci_read32(bus, slot, func, i * 4);
+}
+
+u8 pci_bus_alloc(void) {
+    static u8 free_bus = 1;
+    return free_bus++;
+}
+
+static void pci_scan_function(u8 bus, u8 slot, u8 func) {
+    if (pci_read16(bus, slot, func, 0) == 0xFFFF)
+        return;
+
+    if (pci_device_count >= MAX_PCI_DEVICES)
+        return;
+
+    struct pci_device *dev = &pci_devices[pci_device_count++];
+    dev->bus  = bus;
+    dev->slot = slot;
+    dev->func = func;
+
+    u8 htype = pci_read8(bus, slot, func, 0x0E);
+    dev->header_type = htype;
+
+    if ((htype & 0x7F) == 0x01) {
+        // PCI-to-PCI bridge
+        pci_read_bridge_header(bus, slot, func, &dev->hdr.bridge);
+        dev->vendor_id  = dev->hdr.bridge.h.vendor_id;
+        dev->device_id  = dev->hdr.bridge.h.device_id;
+        dev->int_line   = dev->hdr.bridge.int_line;
+
+        u8 secondary = pci_bus_alloc();
+        dev->hdr.bridge.primary_bus_num      = bus;
+        dev->hdr.bridge.secondary_bus_num    = secondary;
+        dev->hdr.bridge.subordinate_bus_num  = secondary; // tightened after scan
+
+        // Write bus numbers to bridge config space
+        pci_write8(bus, slot, func, 0x18, bus);       // primary
+        pci_write8(bus, slot, func, 0x19, secondary); // secondary
+        pci_write8(bus, slot, func, 0x1A, secondary); // subordinate (updated after)
+
+        printf("[ PCI ] Bridge %u:%u func%u -> secondary bus %u\r\n",
+               bus, slot, func, secondary);
+
+        pci_scan_bus(secondary);
+
+        // Update subordinate to reflect highest bus allocated
+        u8 sub = pci_bus_alloc() - 1; // peek at last allocated
+        pci_write8(bus, slot, func, 0x1A, sub);
+        dev->hdr.bridge.subordinate_bus_num = sub;
+    } else {
+        // Endpoint (type 0x00) or other
+        pci_read_general_header(bus, slot, func, &dev->hdr.general);
+        dev->vendor_id  = dev->hdr.general.h.vendor_id;
+        dev->device_id  = dev->hdr.general.h.device_id;
+        dev->int_line   = dev->hdr.general.int_line;
+
+        printf("[ PCI ] %u:%u.%u vendor=%04X device=%04X class=%02x:%02x\r\n",
+               bus, slot, func, dev->vendor_id, dev->device_id,
+               dev->hdr.general.h.class_code, dev->hdr.general.h.subclass);
+    }
+}
+
+void pci_scan_bus(u8 bus) {
+    for (u8 slot = 0; slot < 32; slot++) {
+        if (pci_read16(bus, slot, 0, 0) == 0xFFFF)
+            continue;
+
+        pci_scan_function(bus, slot, 0);
+
+        // Check multi-function bit in header_type
+        u8 htype = pci_read8(bus, slot, 0, 0x0E);
+        if (htype & 0x80) {
+            for (u8 func = 1; func < 8; func++)
+                pci_scan_function(bus, slot, func);
         }
-}    
+    }
+}
+
+void pci_scan(void) {
+    pci_scan_bus(0);
+}

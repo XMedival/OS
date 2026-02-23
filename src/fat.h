@@ -1,6 +1,7 @@
 #ifndef FAT_H
 #define FAT_H
 #include "types.h"
+#include "blk.h"
 
 // MBR partition types
 #define MBR_TYPE_FAT32_LBA   0x0C
@@ -168,7 +169,7 @@ struct lfn_extension {
     u8 name2[4];
 } __attribute__((packed));
 
-void fat_init(void);
+void fat_init(struct blk_device *dev);
 void fat_mark_dirty(void);
 void fat_flush(void); // Write FAT table(s) back to disk
 void fat_flush_dirty(

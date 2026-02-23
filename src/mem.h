@@ -41,6 +41,9 @@ void *kalloc(u64 npages);
 void *memset(void *dst, int c, u64 n);
 void kinit(u64 hhdm);
 void map_page(u64 virt, u64 phys, u64 flags);
+void map_page_pml4(u64 *pml4, u64 virt, u64 phys, u64 flags);
+u64 *create_user_pml4(void);
 void map_mmio(u64 phys, u64 size);
+void *memcpy(void *dst, const void *src, u64 n);
 
 #endif

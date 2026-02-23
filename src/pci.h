@@ -153,9 +153,12 @@ struct pci_bridge_header {
 struct pci_device {
     u8 bus, slot, func;
     u16 vendor_id, device_id;
-    u8 class_code, subclass;
     u8 header_type;
     u8 int_line;
+    union {
+        struct pci_general_header general;
+        struct pci_bridge_header  bridge;
+    } hdr;
 };
 
 extern struct pci_device pci_devices[MAX_PCI_DEVICES];
@@ -164,6 +167,10 @@ extern u32 pci_device_count;
 // ============================================================================
 // PCI Functions
 // ============================================================================
+
+// Read full config space headers into structs
+void pci_read_general_header(u8 bus, u8 slot, u8 func, struct pci_general_header *out);
+void pci_read_bridge_header(u8 bus, u8 slot, u8 func, struct pci_bridge_header *out);
 
 // Basic config space access
 u8   pci_read8(u8 bus, u8 slot, u8 func, u8 offset);
@@ -200,6 +207,7 @@ static inline void pci_dev_write8(struct pci_device *dev, u8 off, u8 val) {
 
 // Higher-level helpers
 u64  pci_read_bar(u8 bus, u8 slot, u8 func, u8 bar);
+void pci_scan_bus(u8 bus);
 void pci_scan(void);
 
 // Capability list
@@ -211,6 +219,7 @@ void pci_msi_disable(struct pci_device *dev);
 
 // PCI subclass for storage controllers
 #define PCI_SUBCLASS_AHCI  0x06  // SATA AHCI
+#define PCI_SUBCLASS_IDE   0x01  // IDE
 #define PCI_SUBCLASS_NVME  0x08  // NVMe
 
 #endif

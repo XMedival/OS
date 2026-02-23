@@ -50,6 +50,16 @@ static inline u64 read_rflags(void) {
   return rflags;
 }
 
+static inline void lcr3(u64 val) {
+  asm volatile("mov %0, %%cr3" : : "r"(val) : "memory");
+}
+
+static inline u64 rcr3(void) {
+  u64 val;
+  asm volatile("mov %%cr3, %0" : "=r"(val));
+  return val;
+}
+
 static inline u8 xchg(volatile u8 *addr, u8 newval) {
   u8 result = newval;
   asm volatile("lock; xchgb %0, %1"

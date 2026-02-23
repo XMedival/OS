@@ -30,4 +30,20 @@
 // Keyboard Scancode constants
 #define SCANCODE_RELEASE_BIT    0x80  // Bit set for key release in set 1
 
+// PS/2 Mouse commands (sent via PS2_CMD_WRITE_AUX)
+#define PS2_CMD_WRITE_AUX       0xD4  // Route next byte to second port
+#define PS2_MOUSE_ENABLE        0xF4  // Enable data reporting
+#define PS2_MOUSE_RESET         0xFF  // Reset mouse
+
+// PS/2 Mouse packet byte 0 bits
+#define MOUSE_BTN_LEFT          (1 << 0)
+#define MOUSE_BTN_RIGHT         (1 << 1)
+#define MOUSE_BTN_MIDDLE        (1 << 2)
+#define MOUSE_X_SIGN            (1 << 4)
+#define MOUSE_Y_SIGN            (1 << 5)
+#define MOUSE_X_OVERFLOW        (1 << 6)
+#define MOUSE_Y_OVERFLOW        (1 << 7)
+
+void ps2_init(void);
+
 #endif
